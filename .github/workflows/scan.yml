@@ -1,0 +1,48 @@
+# LuvMacro Marketplace malware scan on GitHub's free runners (public repository = free Actions minutes, no card).
+# This repository holds only scanner.js (a copy of rowenshop/tools/luvmacro-scanner/scanner.js) and this workflow. Add one repository secret:
+#   LUVMACRO_SCANNER_SECRET  (Settings > Secrets and variables > Actions > New repository secret)
+# GitHub runs scheduled jobs roughly every 5-15 minutes (it can be later when GitHub is busy).
+# Each run: start ClamAV (it downloads fresh signatures), scan what the marketplace has waiting, report, stop.
+# Nothing is kept between runs. The secret is never printed (GitHub masks it in logs).
+name: scan
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+concurrency:
+  group: scan
+  cancel-in-progress: false
+permissions: {}
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      clamav:
+        image: clamav/clamav:1.4
+        ports:
+          - 3310:3310
+    steps:
+      - name: Stop quietly until the secret is added
+        id: ready
+        env:
+          SECRET: ${{ secrets.LUVMACRO_SCANNER_SECRET }}
+        run: |
+          if [ -z "$SECRET" ]; then echo "LUVMACRO_SCANNER_SECRET isn't set yet: nothing to do."; echo "go=no" >> "$GITHUB_OUTPUT"; else echo "go=yes" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.ready.outputs.go == 'yes'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        if: steps.ready.outputs.go == 'yes'
+        with:
+          node-version: 20
+      - name: Scan waiting marketplace files
+        if: steps.ready.outputs.go == 'yes'
+        env:
+          LUVMACRO_SCANNER_URL: https://rowen.work
+          LUVMACRO_SCANNER_SECRET: ${{ secrets.LUVMACRO_SCANNER_SECRET }}
+          CLAMD_HOST: 127.0.0.1
+          CLAMD_PORT: "3310"
+          SCAN_MAX_MINUTES: "8"
+        run: node scanner.js --once
