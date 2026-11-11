@@ -37,6 +37,17 @@ jobs:
         if: steps.ready.outputs.go == 'yes'
         with:
           node-version: 20
+      - name: Load the newest signatures
+        # The image's signatures are as old as the image. freshclam inside the container downloads newer ones, but
+        # clamd has already started by then and keeps the old set until told to reload, so the scanner reported
+        # stale signatures and the site refused to approve anything. Update, then reload.
+        if: steps.ready.outputs.go == 'yes'
+        run: |
+          id=$(docker ps -q --filter ancestor=clamav/clamav:1.4 | head -n1)
+          test -n "$id"
+          docker exec "$id" freshclam --quiet || echo "freshclam reported a problem; continuing with what is loaded"
+          docker exec "$id" clamdscan --reload || echo "reload failed"
+          docker exec "$id" clamdscan --version
       - name: Scan waiting marketplace files
         if: steps.ready.outputs.go == 'yes'
         env:
