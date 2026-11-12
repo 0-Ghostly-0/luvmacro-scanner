@@ -1,5 +1,6 @@
 # LuvMacro Marketplace malware scan on GitHub's free runners (public repository = free Actions minutes, no card).
-# This repository holds only scanner.js (a copy of rowenshop/tools/luvmacro-scanner/scanner.js) and this workflow. Add one repository secret:
+# Put this file at .github/workflows/scan.yml in a PUBLIC repository that holds only scanner.js (copy of
+# rowenshop/tools/luvmacro-scanner/scanner.js) and this workflow. Add one repository secret:
 #   LUVMACRO_SCANNER_SECRET  (Settings > Secrets and variables > Actions > New repository secret)
 # GitHub runs scheduled jobs roughly every 5-15 minutes (it can be later when GitHub is busy).
 # Each run: start ClamAV (it downloads fresh signatures), scan what the marketplace has waiting, report, stop.
@@ -23,33 +24,35 @@ jobs:
         ports:
           - 3310:3310
     steps:
-      - name: Stop quietly until the secret is added
-        id: ready
-        env:
-          SECRET: ${{ secrets.LUVMACRO_SCANNER_SECRET }}
-        run: |
-          if [ -z "$SECRET" ]; then echo "LUVMACRO_SCANNER_SECRET isn't set yet: nothing to do."; echo "go=no" >> "$GITHUB_OUTPUT"; else echo "go=yes" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/checkout@v4
-        if: steps.ready.outputs.go == 'yes'
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
-        if: steps.ready.outputs.go == 'yes'
         with:
           node-version: 20
-      - name: Load the newest signatures
-        # The image's signatures are as old as the image. freshclam inside the container downloads newer ones, but
-        # clamd has already started by then and keeps the old set until told to reload, so the scanner reported
-        # stale signatures and the site refused to approve anything. Update, then reload.
+      - name: Wait for fresh signatures
+        # The image ships with signatures as old as the image (4 days in practice). The container runs its own freshclam
+        # daemon that downloads newer ones in the first minute, but clamd keeps the old set until it is told to reload.
+        # Running freshclam again by hand does NOT work: the daemon already holds its log lock, so it fails at once
+        # ("Failed to lock the log file") and the old set stays loaded. So: reload clamd until the set it reports is
+        # less than 36 hours old, for up to about 4 minutes, and stop the job with a clear message if it never is.
         if: steps.ready.outputs.go == 'yes'
         run: |
           id=$(docker ps -q --filter ancestor=clamav/clamav:1.4 | head -n1)
           test -n "$id"
-          docker exec "$id" freshclam --quiet || echo "freshclam reported a problem; continuing with what is loaded"
-          docker exec "$id" clamdscan --reload || echo "reload failed"
-          docker exec "$id" clamdscan --version
+          for i in $(seq 1 16); do
+            docker exec "$id" clamdscan --reload > /dev/null 2>&1 || true
+            sleep 4
+            v=$(docker exec "$id" clamdscan --version)
+            echo "attempt $i: $v"
+            when=$(echo "$v" | awk -F/ '{print $3}')
+            ts=$(date -d "$when" +%s 2>/dev/null || echo 0)
+            if [ "$ts" -gt 0 ] && [ $(( $(date +%s) - ts )) -lt 129600 ]; then echo "signatures are fresh"; exit 0; fi
+            sleep 11
+          done
+          echo "::error::The scanner's signatures never became fresh, so nothing will be scanned this run."
+          exit 1
       - name: Scan waiting marketplace files
-        if: steps.ready.outputs.go == 'yes'
         env:
           LUVMACRO_SCANNER_URL: https://rowen.work
           LUVMACRO_SCANNER_SECRET: ${{ secrets.LUVMACRO_SCANNER_SECRET }}
